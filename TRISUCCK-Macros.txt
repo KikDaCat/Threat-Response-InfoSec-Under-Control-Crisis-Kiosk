@@ -1,0 +1,291 @@
+get365AuditRAW(2)
+
+index=o365* $uname$ $extra$
+| rename AffectedItems{}.* AS mItem.*, MessageURLs{} AS MessageURLs, Members{}.* AS Members.*, Attendees{}.* AS Attendees.*
+| makemv MessageURLs
+| makemv Members.UPN
+| spath output=Parameters Parameters{}
+| rex "\"Parameters\":\s?\"(?<xParameters>.+?)(?<!\\\)\","
+| eval Parameters = coalesce(Parameters,xParameters)
+| spath output=OperationProperties OperationProperties{}
+| spath output=ModifiedProperties ModifiedProperties{}
+| spath output=ExchangeMetaData ExchangeMetaData
+| spath output=ExtendedProperties ExtendedProperties{}
+| spath output=PropertyCollection PropertyCollection{}
+| xpath outfield=SourceFileUrl "//SourceFileUrl" field=EventData
+| xpath outfield=TargetFileUrl "//TargetFileUrl" field=EventData
+| eval ITEM=mvappend(coalesce(case(Workload=="MicrosoftForms",mvappend(FormName,"https://forms.microsoft.com/Pages/ResponsePage.aspx?id="+FormId,ActivityParameters),
+                          Workload=="Copilot",mvappend("[".'CopilotEventData.AppHost'."] ",coalesce('CopilotEventData.Contexts{}.Id','CopilotEventData.AccessedResources{}.SiteUrl'),'CopilotEventData.ThreadId'),
+                          Workload=="PowerApps","[".coalesce(AppName,ClientIP)."] ".AdditionalInfo,
+                          Workload=="MicrosoftTeams",
+                             (mvappend(if(CommunicationType!="",CommunicationType." - ","")."[".case(CommunicationType=="OneOnOne",ChatThreadId,
+                                              NOT CommunicationType=="OneOnOne",coalesce(ChatName,ChannelName,TeamName,ChatThreadId))."]",
+                                              coalesce("".MessageURLs,"[#".MessageReactionType."#]","".'Members.UPN',"".MeetingURL,mvappend(coalesce('Attendees.UPN','Attendees.DisplayName'),"MeetingID: ".MeetingDetailId,"Join Time: ".strftime(strptime(JoinTime." UTC","%Y-%m-%dT%H:%M:%S %Z"),"%Y-%m-%d %H:%M:%S %Z"),"Leave Time: ".strftime(strptime(LeaveTime." UTC","%Y-%m-%dT%H:%M:%S %Z"),"%Y-%m-%d %H:%M:%S %Z"),ItemName,coalesce("[".DeviceInformation."]","")),TeamName,ObjectId,"None"))
+                             ),
+                          Workload=="AzureActiveDirectory", coalesce(LogonError." - ".ErrorNumber,OS." - ".BrowserType,mvappend(ObjectId,modified_properties,coalesce(OperationProperties,ModifiedProperties))),
+                          (Workload IN ("OneDrive","SharePoint") AND isnull(TargetUserOrGroupName) AND isnull('SharePointMetaData.FilePathUrl')),if((DestinationRelativeUrl!="" AND Operation IN("FileRenamed","FolderRenamed")),mvappend(ObjectId," => ",SiteUrl.SourceRelativeUrl."/".DestinationFileName),if((coalesce(DestinationRelativeUrl,TargetFileUrl)!="" AND Operation IN("FileMoved","FolderMoved","FileCopied","FolderCopied")),mvappend(coalesce(SourceFileUrl,ObjectId)," => ",coalesce(SiteUrl.DestinationRelativeUrl."/".DestinationFileName,TargetFileUrl)),coalesce(SearchQueryText,ObjectId))),
+                          Workload=="Exchange" AND Operation!="DlpRuleMatch",(mvappend(if(coalesce(SendOnBehalfOfUserSmtp,SendAsUserSmtp)!="","## Sent As [".coalesce(SendOnBehalfOfUserSmtp,SendAsUserSmtp)."] ## ",""),
+                                                                   coalesce(EventData,coalesce(mvappend(coalesce('mItem.Subject','mItem.InternetMessageId','Item.Subject','Item.InternetMessageId'),(if(isnotnull(coalesce('mItem.Attachments','Item.Attachments')),mvappend("---------",coalesce('mItem.Attachments','Item.Attachments')),NULL()))),'mItem.InternetMessageId'),object,'Item.Subject',body),
+                                                                   coalesce(
+                                                                            if(Operation=="AuthenticationRequest",mvappend(Recipient,AuthenticationMethod,MessageId,Sender,OperationProperties),NULL()),
+                                                                            mvappend("[".coalesce('Folder.Path'." => ".'DestFolder.Path','Folders{}.Path','Folder.Path',coalesce('Item.ParentFolder.Name','Item.ParentFolder.Path'))."] ",if(NOT ISNULL(OperationProperties),mvappend(OperationProperties," "),NULL()),if(mvcount('Folders{}.Path')>1,mvappend('Folders{}.Path'," "),NULL()),'Folders{}.FolderItems{}.InternetMessageId',if(NOT ISNULL(ModifiedProperties),mvappend("#########","Modified: ".mvjoin(ModifiedProperties," / ")),NULL())),
+                                                                            Parameters,
+                                                                            coalesce(OperationProperties,ModifiedProperties,mvappend(ResourceURL,UniqueTokenIdentifier)),
+                                                                            TargetUserOrGroupName,
+                                                                            MailboxOwnerUPN
+                                                                            )
+                                                                      
+                                                                   )
+                                                ),
+                          1=1,(mvappend(coalesce("[".SiteUrl."/".SourceRelativeUrl."]",'SharePointMetaData.FilePathUrl',SearchQueryText,EventData,ExchangeMetaData,object,body),
+                                                                   if((object_path!="" AND NOT DestFolder="" AND TargetUserOrGroupName==""),"[".object_path."] ",
+                                                                         coalesce(mvappend(
+                                                                                           'PolicyDetails{}.Rules{}.RuleName',
+                                                                                           'PolicyDetails{}.PolicyName',
+                                                                                           'PolicyDetails{}.Rules{}.ConditionsMatched.SensitiveInformation{}.SensitiveInformationTypeName'
+                                                                                           ),
+                                                                                  mvappend(DetectionMethod,P1Sender,P2Sender,Subject,'Recipients{}',EventDeepLink),
+                                                                                  Parameters,
+                                                                                  mvappend(coalesce("https://security.microsoft.com/alerts/".AlertId,mvappend(InvestigationName,DeepLinkUrl),FlowDetailsUrl,ExtendedProperties,NetworkMessageId,RelativeUrl,InstanceUrl,OperationDetails,PropertyCollection),
+                                                                                           mvappend(json_extract_exact(Data,"eid"),json_extract_exact(Data,"etps"),AlertDisplayName,AlertUri,Audit),"   ","####################",
+                                                                                           coalesce(json_extract_exact(Data,"f3u"),json_extract_exact(Data,"trc"),json_extract(Data,"Entities{}.MailboxPrimaryAddress")),"   ",
+                                                                                           coalesce(mvappend(json_extract_exact(Data,"tsd"),json_extract_exact(Data,"ms")),
+                                                                                                    mvappend(json_extract(Data,"Entities{}.Sender"),json_extract(Data,"Entities{}.Subject"),json_extract(Data,"Entities{}.InternetMessageId"),json_extract(Data,"Entities{}.Url")),
+                                                                                                    json_extract_exact(Data,"reid"),
+                                                                                                    mvappend(ObjectId,TargetUserOrGroupName,TargetUserOrGroupType),
+                                                                                                    AlertDescription,FlowConnectorNames,ReasonForExport,ObjectId,MailboxOwnerUPN,Reason
+                                                                                                    )
+                                                                                           )
+                                                                                  )
+                                                                      )
+                                                                   )
+                                                         )
+                        ),
+                     
+                     EventData,
+                     "Couldn't parse Object"
+                     ),
+                     if(coalesce(FileSyncBytesCommitted,FileSizeBytes,'Item.SizeInBytes')!="",mvappend(" ","FileSize: " + coalesce(FileSyncBytesCommitted,FileSizeBytes,'Item.SizeInBytes')),"" ),
+                     if(mvcount(mvappend(Platform,ApplicationDisplayName))!=0,mvappend(" ","[".mvjoin(mvappend(Platform,ApplicationDisplayName),"/")."]"),NULL()))
+| eval ITEM = if(len(mvindex(ITEM,0))=0,mvindex(ITEM,1,-1),ITEM)
+| eval src_ip=coalesce(src_ip,ClientIPAddress,SenderIp)
+| rex "\"UserAgent\",\"Value\":\"(?<UAgent>.+?)\"[},]"
+| eval UserAgent=coalesce(UserAgent,user_agent,UAgent)
+| eval UserId=mvdedup(mvappend(UserId,MailboxOwnerUPN,SendAsUserSmtp,SendOnBehalfOfUserSmtp))
+| eval Process=Workload.if(ClientProcessName!=""," - ".ClientProcessName,"")
+| search Operation!=ManagedSyncClientAllowed
+| search [| makeresults 
+          | eval UserId = replace(lower("$uname$")," or ","#")
+          | makemv delim="#" UserId 
+          | format] OR UserId="$uname$" OR (("AirInvestigation" OR "SecurityComplianceAlerts") AND $uname$ $extra$) OR match(UserId,$uname$)
+| table _time src_ip UserId Process Operation ITEM UserAgent _raw
+| sort 0 _time desc
+
+#####################################
+
+getAzureRAW(2)
+
+index=azure sourcetype IN("azure:aad:audit","azure:aad:signin","ms365:defender:incident:alerts") $uname$ $extra$
+| spath output=modifiedProperties targetResources{}.modifiedProperties{}
+| spath output=authenticationDetails authenticationDetails{}
+| spath output=entities entities{}
+| rex "\"ipAddress\": \"(?<alertIP>.+)\"}"
+| eval user=coalesce(user,'initiatedBy.user.userPrincipalName','initiatedBy.app.displayName')
+| eval src_ip=mvappend(coalesce(src_ip,'initiatedBy.user.ipAddress',alertIP),'deviceDetail.displayName')
+| eval Operation=mvappend(category,operationType,activityDisplayName,authenticationRequirement,authentication_method,tokenIssuerType)
+| eval result=coalesce(result,action)
+| eval ITEM=coalesce('',
+                     mvappend(appDisplayName,authenticationDetails),
+                     mvappend(mvfilter(NOT match('targetResources{}.displayName',"null")),mvfilter(NOT match('targetResources{}.userPrincipalName',"null")),modifiedProperties,result,resultReason),
+                     mvappend(title,description,entities)
+                     )
+| search [| makeresults 
+          | eval user = replace(lower("$uname$")," or ","#")
+          | makemv delim="#" user
+          | format] OR user="$uname$"
+| table  _time user src_ip result Operation ITEM user_agent _raw
+| sort 0 _time desc
+
+#####################################
+
+getBluecatRAW(1)
+
+index=bluecat $xkeyword$
+| rex "for (?<dest_ip>.+) from (?<dest_mac>[^ ()]+)( \((?<dest_nt_host>.+)\))? via (?<interface_ip>[^:\s]+)(: (?<xMSG>.+))?$"
+| eval dest_ip=split(replace(dest_ip,"[()]","")," ")
+| eval message=coalesce(message,xMSG)
+| eval message=if((NOT signature="*" AND NOT dest_ip="*" AND NOT message="*"),_raw,"")
+| table _time signature dest_ip dest_nt_host dest_mac interface_ip message index _raw
+| sort 0 _time desc
+
+#####################################
+
+getDNSRAW(2)
+
+((index=cisco_umbrella sourcetype=cisco:umbrella:dns) OR index IN (bluecat_dns,aws-dns,lakeland-dns)) $xuser$ $xkeyword$
+| eval user = coalesce(user,src)
+| eval action = coalesce(action,reply_code)
+| search [| makeresults 
+          | eval user = split(lower("$xuser$")," or ")
+          | format] OR user=$xuser$
+| table _time index user query action src src_translated_ip _raw
+| sort 0 _time desc
+
+#####################################
+
+getEDRRAW(2)
+
+index=edr metadata.eventType IN (ReconNotificationSummaryEvent,IdentityProtectionEvent,IdpDetectionSummaryEvent,DetectionSummaryEvent,IncidentSummaryEvent)  $xuser$ $extra$ 
+| eval Entity=coalesce(mvappend(user,'event.EndpointName','event.ComputerName','event.HostID','event.LocalIP'),'event.RuleTopic')
+| eval PProc=if(isnotnull('event.ParentCommandLine'),mvappend("### Parent process ###",'event.ParentCommandLine'),"")
+| eval description=coalesce(description,'event.Highlights{}',mvdedup(mvappend('event.DetectDescription','event.AssociatedFile','event.QuarantineFiles{}.ImageFileName','event.IOCValue','event.CommandLine',PProc)))
+| eval Detection=mvappend(coalesce('event.DetectName','event.IncidentType','event.RuleName'),'event.SeverityName')
+| eval reconurl="https://falcon.us-2.crowdstrike.com/intelligence-v2/notifications/"+'event.NotificationId'
+| eval url=coalesce(url,reconurl)
+| eval action=coalesce(action,'event.RulePriority')
+| search [| makeresults 
+          | eval Entity = split(lower("$xuser$")," or ")
+          | format] OR Entity ="$xuser$"
+| table _time action Entity event.UserName Detection description url _raw
+| sort _time desc
+
+#####################################
+
+getEmailsRAW(2)
+
+index=proofpoint sourcetype IN (pps_messagelog,proofpoint_tap_siem) $xuser$ $extra$
+| spath output=xActions filter.actions{}
+| eval eFrom = coalesce('envelope.from','sender')
+| eval hFrom = coalesce('msg.header.from{}','headerFrom')
+| eval eRcpt = coalesce('envelope.rcpts{}','recipient{}',recipient)
+| eval hRcpt = coalesce('msg.header.to','toAddresses{}')
+| eval xSender=mvappend(eFrom," ",hFrom)
+| eval xSender=if((NOT match(hFrom,'msg.header.return-path{}') AND 'msg.header.return-path{}'!="NULL"),mvappend(xSender,"-------",'msg.header.return-path{}',"-------",'connection.ip'),mvappend(xSender,"-------",'connection.ip'))
+| eval longCC=if(len(tostring(hRcpt))>80,substr(hRcpt,0,80)+"... [truncated]",coalesce(hRcpt,"Proofpoint TAP"))
+| eval xRecipient=mvappend(eRcpt,"-------",longCC,"-------",eventType)
+| eval Attachments=mvappend(mvfilter(NOT match('msgParts{}.labeledName',"text\.(html|txt)") AND NOT match('msgParts{}.labeledName',"image0\d{2}\.(png|jp.?g|gif)") AND NOT match('msgParts{}.labeledName',"image-(png|jp.?g|gif)")),mvfilter(NOT match('messageParts{}.filename',"text\.(html|txt)") AND NOT match('messageParts{}.filename',"image0\d{2}\.(png|jp.?g|gif)") AND NOT match('messageParts{}.filename',"image-(png|jp.?g|gif)")))
+```| eval xActions=replace(tostring(xActions)," ","")```
+| eval tmp = split(lower("$xuser$")," or ")
+| eval getall = if(tmp=="*",1,0)
+| eval subject =coalesce('msg.normalizedHeader.subject{}','msg.header.subject',subject,mvappend(threatURL,eRcpt,"-------",url))
+| eval final_action = coalesce(final_action,mvappend("Proofpoint TAP Alert",eventType,quarantineRule))
+| where lower(eFrom) IN(tmp) OR lower(hFrom) IN(tmp) OR lower(eRcpt) IN(tmp) OR getall=1
+| eval EmailSource = coalesce(GUID,"N/A")
+| table _time xSender subject xRecipient final_action Attachments url EmailSource ```xActions``` _raw
+| sort _time desc
+
+#####################################
+
+getEPICRAW(2)
+
+index=epic_security $xuser$ $subkey$
+| rex field=usrName "[^/-]+\-[^/-]+/-(?<xUser>[^/-]+)"
+| eval user = coalesce(user,LOGIN_LDAP_ID,UID,MYCACCT,xUser,usrName)
+| eval Activities = mvappend(mvappend(ROLE,USERJOB,SOURCE,APP),coalesce(CTXT, LOGIN_CONTEXT, PWREASON),SERVICENAME,SERVICETYPE,FILENAME,coalesce('AUDIT SESSION', CSISESS_TOKEN, E3MID),coalesce(BTGEXPLANATION, flag),mvappend(IP_ADDRESSES, IP, REMOTE_IP))
+| rename resource AS hostname, shost AS ENV
+| search [| makeresults 
+          | eval user = split(lower("$xuser$")," or ")
+          | format] OR user="$xuser$"
+| dedup _time user Activities
+| table _time user usrName Activities LOGIN_DEVICE MASKMODE CLIENTNAME hostname ENV _raw
+| sort 0 _time desc
+
+#####################################
+
+getPingMFARAW(1)
+
+index=pingmfa $object$
+| rex "(?<ReqDevice>(?=Mobile OS Version).+(?=Action:))"
+| rex "(?<prevLogin>(?=Previous Authentication).+(?=IP Reputation))"
+| eval recorded=recorded+" -EST"
+| eval UserResponse="[" + strftime(_time,"%Y-%m-%d %H:%M:%S %Z") + "] " + "[Response to " +  'resources{}.ipaddress' + " request] : " + 'resources{}.pingidmsg'
+| makemv delim="\\n" ReqDevice
+| makemv delim="\\n" prevLogin
+| eval ReqDevice=mvfilter(NOT match(ReqDevice,"(?i)Lock|Rooted|MDM"))
+| eval ReqIP = coalesce(src,'resources{}.ipaddress')
+| eval RespIP = if(src!="",'resources{}.ipaddress',NULL)
+| transaction websession
+| eval ReqIP = mvdedup(mvfilter(NOT match(ReqIP,"N\/A")))
+| eval ReqApp=if(requested_application_name == "N/A",requested_application_id,requested_application_name)
+| eval status = mvfilter(NOT match(status,"POLICY"))
+| eval status = if(match('resources{}.pingidmsg',"Canceled from server"),NULL,status)
+| eval ReqDevice=coalesce(ReqDevice,'result.message')
+| stats values(ReqIP) AS ReqIP values(RespIP) AS NotifiedIP values(status) AS STATUS values(ReqApp) AS ReqApp values(ReqDevice) AS NotifiedDevice values(prevLogin) AS prevLogin values(UserResponse) AS UserResponse ```list(_raw) AS _raw``` BY _time user websession _raw
+| eval NotifiedIP = if(NotifiedIP IN (ReqIP) AND NOT match(STATUS,".+") AND match(UserResponse,"Unresponsive"),"User did not open the PingID app to respond",NotifiedIP)
+| sort 0 _time desc
+
+#####################################
+
+getSFLogsRAW(1)
+
+index=salesforce* CLIENT_IP!="" $xkeyword$ 
+| rex "URL=\"\"(?<xURL>[^\"]+)\"\""
+| rex "TIMESTAMP_DERIVED=\"(?<TIMESTAMP_DERIVED>[^\"]+)\""
+| bin span=1m _time
+| eval TIMESTAMP_DERIVED = strftime(strptime(TIMESTAMP_DERIVED,"%Y-%m-%dT%H:%M:%S.%3Q%Z"),"%Y-%m-%d %H:%M:%S %Z")
+| eval PU = TIMESTAMP_DERIVED + " [" + REQUEST_ID + "] [PU] " + " [" + coalesce(REQUEST_STATUS,"None") + "] [" + coalesce(SFDCLogType,"None") + "] " + PAGE_URL + coalesce(" >> " + coalesce(ACTION,"") + ACTION_MESSAGE,"")
+| eval PN = TIMESTAMP_DERIVED + " [" + REQUEST_ID + "] [PN] " + " [" + coalesce(REQUEST_STATUS,"None") + "] [" + coalesce(SFDCLogType,"None") + "] " + PAGE_NAME + coalesce(" >> " + coalesce(ACTION,"") + ACTION_MESSAGE,"")
+| eval xURI = TIMESTAMP_DERIVED + " [" + REQUEST_ID + "] [URI] " + " [" + coalesce(REQUEST_STATUS,"None") + "] [" + coalesce(SFDCLogType,"None") + "] " + coalesce(xURL,URI) + coalesce(" >> " + coalesce(ACTION,"") + ACTION_MESSAGE,"")
+| eval URL=coalesce(PU,xURI,PN,TIMESTAMP_DERIVED." ".SFDCLogType." ".xURL)
+| eval user = mvappend(user,USER_ID)
+| rename values(*) AS *, URL AS Activities
+| table _time user CLIENT_IP LOGIN_STATUS Activities USER_AGENT USER_ID _raw
+| sort 0 _time desc
+
+#####################################
+
+getWebHistoryRAW(2)
+
+(index IN (cisco_proxy,zscaler,checkpoint,aws-vpcflow,aws-waf) OR (index=cisco_umbrella AND sourcetype=cisco:umbrella:proxy)) OR (index=proofpoint (eventtype IN (proofpoint_isolation_url,proofpoint_isolation_web) OR sourcetype=proofpoint_tap_siem)) (NOT http_method IN(OPTIONS,HEAD)) (NOT http_content_type IN ("image/*")) $xuser$ $extra$
+| regex url!=".*\/[^\/\s?]+(\.(css|.if|jpe?g|png|svg|bmp|ico|ttf|woff.?))"
+| rex field=url "(google|bing|search\.yahoo)\.com[^\s]*\/(search|uviewer|suggestion)[^\s]*?(\?|&)(q(ry)?|p|command)=(?<tmp1>[^&\s]+)"
+| rex field=url "(google|bing|yahoo)\.com[^\s]+\b(url|click|GLinkPingPost)\b[^\s]+(&|\?)url=(?<tmp2>[^\s&]+)"
+| rex field=url "https?:\/\/(?<extdest>[^\b\/]+)"
+| eval squery=coalesce(tmp1,tmp2)
+| eval action=coalesce(action,eventType)
+| eval user=coalesce(recipient,userName,user,src_machine_name,src)
+| eval src_ip=coalesce(clickIP,userName,src_ip,src,origin,src_machine_name)
+| eval dest_ip=coalesce(dest_ip,dst,dest)
+| eval dest=coalesce(sni,url_domain,appi_name,dest,extdest)
+| eval xdirection=src_port+" -> "+dest_port
+| eval dest_port=coalesce(xdirection,service,transport,protocol)
+| eval url=coalesce(url,mvappend(malware_family,protection_name,file_name,file_md5))
+| search [| makeresults 
+          | eval user = split(lower("$xuser$")," or ")
+          | format] OR user="$xuser$"
+| eval squery=urldecode(squery)
+| eval src_ip = mvappend(src_ip,coalesce(clientpublicIP,""),coalesce(devicehostname,""),coalesce(src_machine_name,""))
+| table _time index action user src_ip dest squery dest_ip dest_port http_method http_content_type status http_referrer url _raw
+| sort 0 _time desc
+
+#####################################
+
+getWinEventRAW(2)
+
+index=wineventlog* $xuser$ $subsearch$
+| eval Message=replace(Message,"\r","")
+| rex "Message=(?<sMSG>[^\n]+)"
+| rex field=Message "[^\n]+(\r?\n){1,}(?<xMSG1>Subject:[\s\S]+)\n{2}(?<xMSG2>[\s\S]+)(This event)?"
+| rex field=Message "[^\n]+(\r?\n){1,}(?<xMSG1>Subject:[\s\S]+)(?=Object:)(?<xMSG2>[\s\S]+)(This event)?"
+| rex field=Message "[^\n]+(\r?\n){1,}(?<xMSG1>Subject:[\s\S]+)(?=Privileges:)(?<xMSG2>[\s\S]+)(This event)?"
+| rex field=Message "[^\n]+(\r?\n){1,}(?<xMSG1>Subject:[\s\S]+)(?=Service Request Information:)(?<xMSG2>[\s\S]+)(This event)?"
+| rex field=Message "[^\n]+(\r?\n){1,}(?<xMSG1>Account Information:[\s\S]+)(?=Additional Information:)(?<xMSG2>[\s\S]+)(This event)?"
+| rex field=Message "[^\n]+(\r?\n){1,}(?<xMSG1>Subject:[\s\S]+)(?=Process Information:)(?<xMSG2>[\s\S]+)(This event)?"
+| rex field=Message "(\r?\n){1,}(?<xMSGAll>[\s\S]+)(\r?\n){1,}"
+| rex field=ComputerName "([^\s\/]+)\.(?<xDomain>[^\.\s]+\.[^\/\.]+)"
+| eval xService=coalesce(Service_Name,Logon_Process,Process_Name)
+| eval xMSG1=replace(replace(xMSG1,"\r",""),"\n{1,}","####")
+| eval xMSG2=replace(replace(xMSG2,"\r",""),"\n{1,}","####")
+| eval xMSG1=coalesce(mvappend(sMSG,' ',coalesce(xMSG1,xMSGAll)),Message)
+| makemv delim="####" xMSG1
+| makemv delim="####" xMSG2
+| eval user=coalesce(user,Machine_SamAccountName)
+| eval EventCode_Task_Service=mvappend(EventCode,TaskCategory,xService)
+| eval Account_Domain=mvappend(Account_Domain,xDomain)
+| eval xTraffic=mvappend(coalesce(src,Network_Address,ComputerName),"-------",dest,Account_Domain)
+| search [| makeresults 
+          | eval user = split(lower("$xuser$")," or ")
+          | format] OR user=$xuser$ OR NOT user
+| table _time user xTraffic EventCode_Task_Service xMSG1 xMSG2 ```Message``` _raw
+| sort 0 _time desc
+
